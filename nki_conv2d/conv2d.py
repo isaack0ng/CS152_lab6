@@ -19,7 +19,7 @@ Args:
 Returns:
     out_tensor: The result of the 2D convolution operation, with shape 
                 (batch_size, out_channels, output_height, output_width).
-Note:
+Note:row_out = np.zeros((c_out_tile, out_width), dtype=np.float32)
     For ease of implementation, you can expect the inputs to abide by the following restrictions
     - filter_height == filter_width
     - input_channels % 128 == 0
@@ -59,14 +59,18 @@ def conv2d_nki(X, W, bias):
         dtype=W.dtype,
         buffer=nl.sbuf
     )
+    wt = nl.ndarray(shape=(c_in_tile,c_out_tile, n_tiles_c_out,n_tiles_c_in, filter_height, filter_width), dtype=W.dtype, buffer=nl.sbuf)
     for c_out_tile_idx in nl.affine_range(n_tiles_c_out):
         for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-            for i in nl.affine_range(filter_height):
+            for i in nl.affine_range(filter_height): 
                 for j in nl.affine_range(filter_width):
                     # 1. Load the weight tile for the current input and output channel tiles idx and filter position
                     # 2. Store it in the w array at the correct location and orientation
                     # YOUR CODE HERE
-
+            
+                    nisa.dma_copy(dst=w_tile, src=W[c_out_tile_idx*c_out_tile: (c_out_tile_idx + 1)*c_out_tile, c_in_tile_idx*c_in_tile: (c_in_tile_idx+1)*c_in_tile, i, j])
+                    w[:,:,c_out_tile_idx, c_in_tile_idx,i,j] = nisa.nc_transpose(data=w_tile)
+                
     # Process the images one-by-one
     for img in nl.affine_range(batch_size):
         # Process each output channel tile
@@ -75,19 +79,24 @@ def conv2d_nki(X, W, bias):
             for out_row in nl.affine_range(out_height):
                 # Assign PSUM buffer to accumulate output row
                 # YOUR CODE HERE
-
+                row_out = nl.zeros(shape=(c_out_tile, out_width), dtype=nl.float32, buffer=nl.psum)
                 # Loop over the input channel tiles and filter positions, accumulating the output row
                 for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                     for i in nl.affine_range(filter_height):
                         for j in nl.affine_range(filter_width):
                             # 1. Select the weight tile for the current input and output channel tiles idx and filter position
+                            
                             # 2. Load the input tile for the current input channel tile idx, output row, filter position
+                            x_tile = nl.ndarray(shape=(c_in_tile, out_width), dtype=X.dtype, buffer=nl.sbuf)
+                            nisa.dma_copy(dst=x_tile, src=X[img,c_in_tile_idx*c_in_tile:(c_in_tile_idx + 1)*c_in_tile, i+out_row,j:j+out_width])
                             # 3. Matmul the weight tile and input tile, and accumulate the result in row_out
                             # YOUR CODE HERE
-
+                            row_out += nisa.nc_matmul(stationary=w[:,:,c_out_tile_idx,c_in_tile_idx,i,j], moving=x_tile)
                 # Load and add the bias to the row_out based on the current output channel tile idx
                 # YOUR CODE HERE
-
+                b = nl.ndarray(shape=(c_out_tile,1), dtype=bias.dtype, buffer=nl.sbuf)
+                nisa.dma_copy(dst=b, src=bias[c_out_tile_idx*c_out_tile:(c_out_tile_idx + 1)*c_out_tile])
+                nisa.dma_copy(dst=X_out[img, c_out_tile_idx*c_out_tile:(c_out_tile_idx + 1)*c_out_tile, out_row,:], src=nl.add(row_out,b))
                 # Store the output  
                 # YOUR CODE HERE
 
